@@ -1,14 +1,16 @@
 --[[
-LayeredQuarryMiner - Fixed Zone Edition (Front Chest)
+LayeredQuarryMiner - Persistent Quarry Version
 by FIYREX
 
 Features:
 ✅ Chest must be in front
-✅ Mines one fixed zone only (no offset on reruns)
-✅ If area below is already mined, prints "Quarry complete"
-✅ Smart fuel check and refueling
-✅ Auto unload to front chest
-✅ Accurate coordinates, vertical descent
+✅ Mines one fixed zone only (X×Z area)
+✅ Saves progress (depth mined) to quarry_state.txt
+✅ Continues deeper if user sets a greater depth
+✅ Stops if quarry already complete
+✅ Straight down vertical mining
+✅ Auto unload when full
+✅ Smart fuel check
 ]]
 
 -- === Utilities ===
@@ -20,33 +22,72 @@ print("Enter length (X):")
 local length = tonumber(read())
 print("Enter width (Z):")
 local width = tonumber(read())
-print("Enter depth (Y):")
+print("Enter total depth (Y):")
 local depth = tonumber(read())
 
 local fuelSlot = 16
-
--- === State ===
+local dir = 0 -- 0=N,1=E,2=S,3=W
 local x, y, z = 0, 0, 0
-local dir = 0 -- 0=N, 1=E, 2=S, 3=W
+local chestDir = 0
+local chestPos = {x=0, y=0, z=0}
+local stateFile = "quarry_state.txt"
+local minedDepth = 0
 
--- === Chest check (front) ===
+-- === Chest Detection ===
 local function isChest(name)
   return name and (name:find("chest") or name:find("barrel"))
 end
 
-local function checkFrontChest()
-  local ok, data = turtle.inspect()
-  if not ok or not isChest(data.name) then
-    warn("No chest detected in front! Place a chest and press Enter.")
-    read()
-  else
-    say("Detected chest in front: " .. data.name)
+local function detectChestAround()
+  for i = 0, 3 do
+    local ok, data = turtle.inspect()
+    if ok and isChest(data.name) then
+      chestDir = dir
+      chestPos = {x=x, y=y, z=z}
+      say("Deposit chest detected in front: " .. data.name)
+      return true
+    end
+    turtle.turnRight()
+    dir = (dir + 1) % 4
+  end
+  return false
+end
+
+if not detectChestAround() then
+  warn("No chest detected nearby! Place one and press Enter.")
+  read()
+  detectChestAround()
+end
+
+-- === State Management ===
+local function loadState()
+  if fs.exists(stateFile) then
+    local h = fs.open(stateFile, "r")
+    local data = textutils.unserialize(h.readAll())
+    h.close()
+    if data and data.length == length and data.width == width then
+      minedDepth = data.minedDepth or 0
+      say("Loaded saved quarry progress: mined " .. minedDepth .. " layers.")
+    else
+      warn("Previous quarry dimensions differ. Starting new quarry.")
+    end
   end
 end
 
-checkFrontChest()
+local function saveState()
+  local h = fs.open(stateFile, "w")
+  h.write(textutils.serialize({length = length, width = width, minedDepth = minedDepth}))
+  h.close()
+end
 
--- === Fuel Logic ===
+loadState()
+
+if minedDepth >= depth then
+  warn("Quarry already complete up to " .. minedDepth .. " layers.")
+  return
+end
+
+-- === Fuel ===
 local function estimateFuel()
   local total = (length * width * depth * 2) + (length + width + depth)
   return math.ceil(total * 1.1)
@@ -76,12 +117,11 @@ end
 
 ensureFuel()
 
--- === Dig Functions ===
+-- === Movement ===
 local function tryDig() while turtle.detect() do turtle.dig(); sleep(0.3) end end
 local function tryDigDown() while turtle.detectDown() do turtle.digDown(); sleep(0.3) end end
 local function tryDigUp() while turtle.detectUp() do turtle.digUp(); sleep(0.3) end end
 
--- === Movement ===
 local function forward()
   refuel()
   tryDig()
@@ -130,7 +170,7 @@ local function face(target)
   while dir ~= target do turnRight() end
 end
 
--- === Absolute Navigation ===
+-- === Navigation ===
 local function goTo(tx, ty, tz, tdir)
   while y < ty do up() end
   while y > ty do down() end
@@ -144,7 +184,7 @@ local function goTo(tx, ty, tz, tdir)
   face(tdir or 0)
 end
 
--- === Inventory Handling ===
+-- === Inventory ===
 local function isInventoryFull()
   for i = 1, 15 do
     if turtle.getItemCount(i) == 0 then return false end
@@ -152,28 +192,29 @@ local function isInventoryFull()
   return true
 end
 
-local function dropItems()
-  local sx, sy, sz, sdir = x, y, z, dir
-  say("Inventory full — unloading to front chest...")
-  face(2)
-  for i = 1, 15 do
-    turtle.select(i)
-    turtle.drop()
+local function depositToChest()
+  say("Depositing to chest...")
+  goTo(chestPos.x, chestPos.y, chestPos.z, chestDir)
+  face(chestDir)
+  local ok, data = turtle.inspect()
+  if ok and isChest(data.name) then
+    for i = 1, 15 do
+      turtle.select(i)
+      turtle.drop()
+    end
+    turtle.select(1)
+    say("Deposited successfully.")
+  else
+    warn("Chest missing! Place it again and press Enter.")
+    read()
+    depositToChest()
   end
-  turtle.select(1)
-  face(sdir)
-  goTo(sx, sy, sz, sdir)
 end
 
--- === Quarry Validation ===
+-- === Ground Check ===
 local function isGrounded()
   local ok, _ = turtle.inspectDown()
   return ok
-end
-
-if not isGrounded() then
-  warn("No block detected under start position. Quarry already complete.")
-  return
 end
 
 -- === Layer Mining ===
@@ -181,7 +222,7 @@ local function mineLayer()
   for row = 1, width do
     for col = 1, length - 1 do
       forward()
-      if isInventoryFull() then dropItems() end
+      if isInventoryFull() then depositToChest() end
     end
     if row < width then
       if row % 2 == 1 then turnRight(); forward(); turnRight()
@@ -193,37 +234,34 @@ local function mineLayer()
   face(0)
 end
 
--- === Mining Execution ===
+-- === Continue from previous depth ===
+if minedDepth > 0 then
+  say("Descending to previous quarry depth (" .. minedDepth .. ")...")
+  for i = 1, minedDepth do down() end
+end
+
+-- === Start Mining ===
 say("Starting mining...")
 
-turtle.digDown()
-down()
-
-for d = 1, depth do
+for d = minedDepth + 1, depth do
   if not isGrounded() then
     say("No more ground — quarry already complete.")
-    goTo(0, 0, 0, 2)
-    for i = 1, 15 do
-      turtle.select(i)
-      turtle.drop()
-    end
+    depositToChest()
     say("Returning to chest. Mining finished.")
     return
   end
 
   say(("Mining layer %d/%d..."):format(d, depth))
   mineLayer()
+  minedDepth = minedDepth + 1
+  saveState()
+
   if d < depth then
     say("Descending to next layer...")
     down()
   end
 end
 
-say("Returning to chest...")
-goTo(0, 0, 0, 2)
-for i = 1, 15 do
-  turtle.select(i)
-  turtle.drop()
-end
-turtle.select(1)
-say("All done. Returned to chest. Happy mining!")
+say("Returning to deposit chest...")
+depositToChest()
+say("All done. Returned to chest. Quarry saved at depth " .. minedDepth .. ".")
