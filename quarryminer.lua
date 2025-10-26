@@ -1,6 +1,6 @@
--- === FIYREX QUARRY MINER (Manual-Y + Smart Priority + Return Home) ===
--- Fully autonomous quarry system with tiered ore priorities and optional cobblestone fill-back.
--- Now asks for Y-level manually and returns to the starting position after completion.
+-- === FIYREX QUARRY MINER ===
+-- Depth-based autonomous mining turtle with Smart Ore Priority and Cobblestone Assurance System (CAS)
+-- Features: Depth input, ore priority, auto-refuel, auto-deposit, cobblestone reserve & auto-fill
 
 -- === PROMPT HELPERS ===
 local function promptNumber(msg)
@@ -24,18 +24,25 @@ end
 -- === INPUTS ===
 local l = promptNumber("Quarry length:")
 local w = promptNumber("Quarry width:")
-local z0 = promptNumber("Enter starting Y-level (your current height):")
-
-print("Starting Y-level set to: " .. z0)
+local depth = promptNumber("Quarry depth (how many blocks down to dig):")
+print("Mining will go " .. depth .. " blocks deep from current position.")
 
 local whitelist = promptYesNo("Use whitelist mode?")
 local digWholeChunk = promptYesNo("Dig the whole chunk?")
-local fin
-if digWholeChunk then
-  fin = z0
-else
-  fin = promptNumber("Layers to dig:")
-end
+
+-- === STATE VARIABLES ===
+local x, y, z = 0, 0, 0
+local face, rev, counter = 0, 1, 0
+local arr, trashtable = {0}, {}
+local cobble, stone = false, false
+local slot = 16
+local fuelName = nil
+local startFace = 0
+
+-- === COBBLESTONE CONTROL ===
+local cobbleCount = 0
+local cobbleReserve = math.floor(l * w * depth * 0.75)
+print("Cobblestone reserve target for fill: " .. cobbleReserve .. " blocks.")
 
 -- === ORE PRIORITY TABLES ===
 local highPriorityOres = {
@@ -58,28 +65,21 @@ local mediumPriorityOres = {
   ["minecraft:ancient_debris"] = true,
   ["minecraft:emerald_ore"] = true,
   ["minecraft:deepslate_emerald_ore"] = true,
+
 }
 
 local customPriorityOres = {
-  -- Add any custom ores here:
+  -- Add any custom ores here
   -- ["minecraft:emerald_ore"] = true,
 }
 
--- === STATE VARIABLES ===
-local x, y, z = 0, 0, 0
-local face, rev, counter = 0, 1, 0
-local arr, trashtable = {0}, {}
-local cobble, stone = false, false
-local slot = 16
-local fuelName = nil
-local startX, startY, startZ, startFace = 0, 0, 0, 0
-
+-- === INITIALIZATION ===
 do
   local d = turtle.getItemDetail(16)
   if d and d.name then fuelName = d.name end
 end
 
--- === CORE HELPERS ===
+-- === UTILITY FUNCTIONS ===
 local function refuel()
   if turtle.getFuelLevel() >= 500 then return end
   for i = 1, 16 do
@@ -116,7 +116,7 @@ local function moveForward()
   elseif face == 3 then x = x - 1 end
 end
 
--- === ITEM HANDLING ===
+-- === ITEM MANAGEMENT ===
 local function buildList()
   for i = 1, 15 do
     if turtle.getItemCount(i) > 0 then
@@ -129,18 +129,31 @@ local function buildList()
     else slot = i; break end
   end
   print("Item list captured.")
-  while face ~= 2 do turn(1) end
-  for i = 1, slot - 1 do turtle.select(i); turtle.drop() end
-  turn(-1); turn(-1); turtle.select(1)
 end
 
 local function depositAll()
-  print("Depositing items at start point...")
+  print("Depositing items (keeping cobblestone reserve)...")
+  cobbleCount = 0
   for i = 1, 16 do
-    turtle.select(i)
-    if i ~= 16 or not turtle.refuel(0) then turtle.drop() end
+    local d = turtle.getItemDetail(i)
+    if d and d.name == "minecraft:cobblestone" then
+      cobbleCount = cobbleCount + turtle.getItemCount(i)
+    end
+  end
+
+  for i = 1, 16 do
+    local d = turtle.getItemDetail(i)
+    if d then
+      if d.name == "minecraft:cobblestone" and cobbleCount < cobbleReserve then
+        -- Keep cobblestone until reserve met
+      else
+        turtle.select(i)
+        if i ~= 16 or not turtle.refuel(0) then turtle.drop() end
+      end
+    end
   end
   turtle.select(1)
+  print(string.format("💾 Cobblestone held: %d / %d", cobbleCount, cobbleReserve))
 end
 
 -- === SMART DIGGING ===
@@ -165,43 +178,90 @@ local function isFull()
   return true
 end
 
-local function trashRemoval()
-  for i = 1, 15 do
-    if not arr[i + 1] then
-      local dispose = whitelist
-      local d = turtle.getItemDetail(i)
-      if d then
-        for j = 1, slot - 1 do
-          if whitelist then if d.name == trashtable[j] then dispose = false end
-          else if d.name == trashtable[j] then dispose = true end end
-        end
-        local tags = (d and d.tags) or {}
-        if cobble and tags["forge:cobblestone"] then dispose = not whitelist end
-        if stone and tags["forge:stone"] then dispose = not whitelist end
-        if dispose then turtle.select(i); turtle.drop() end
-      end
-      if turtle.getItemCount(i) > 0 then arr[i + 1] = 1; arr[1] = (arr[1] or 0) + 1 end
+-- === COBBLE REFILL SYSTEM ===
+local function cobbleCheckAndRefill(cobbleNeeded)
+  print("🔍 Checking cobblestone inventory for fill...")
+  local cobbleCount = 0
+  for i = 1, 16 do
+    local d = turtle.getItemDetail(i)
+    if d and d.name == "minecraft:cobblestone" then
+      cobbleCount = cobbleCount + turtle.getItemCount(i)
     end
   end
-  turtle.select(1)
+
+  if cobbleCount >= cobbleNeeded then
+    print("✅ Enough cobblestone available: " .. cobbleCount)
+    return true
+  end
+
+  local missing = cobbleNeeded - cobbleCount
+  print("⚠️ Not enough cobblestone. Need " .. missing .. " more blocks.")
+
+  local hasChest, chestData = turtle.inspect()
+  if hasChest and chestData.name:find("chest") then
+    print("📦 Chest detected in front. Attempting to pull cobblestone...")
+    while missing > 0 do
+      if turtle.suck() then
+        cobbleCount = 0
+        for i = 1, 16 do
+          local d = turtle.getItemDetail(i)
+          if d and d.name == "minecraft:cobblestone" then
+            cobbleCount = cobbleCount + turtle.getItemCount(i)
+          end
+        end
+        missing = cobbleNeeded - cobbleCount
+        if missing <= 0 then
+          print("✅ Cobblestone refill complete!")
+          return true
+        end
+      else
+        print("⏳ Waiting for cobblestone in chest... still need " .. missing)
+        sleep(5)
+      end
+    end
+  else
+    print("❌ No chest found in front. Please place cobblestone manually.")
+    repeat
+      sleep(5)
+      local current = 0
+      for i = 1, 16 do
+        local d = turtle.getItemDetail(i)
+        if d and d.name == "minecraft:cobblestone" then
+          current = current + turtle.getItemCount(i)
+        end
+      end
+      missing = cobbleNeeded - current
+    until missing <= 0
+  end
+  return true
 end
 
+-- === MINING LOGIC ===
 local function checkfuel()
   refuel()
   local need = (x + y + z) + (l * w)
-  if turtle.getFuelLevel() < need then goHome("fuel") end
+  if turtle.getFuelLevel() < need then
+    print("⚠️ Low fuel. Waiting for refill...")
+    repeat sleep(5); refuel() until turtle.getFuelLevel() >= need
+  end
 end
 
 local function mineStep()
   if counter % 16 == 0 then checkfuel(); counter = 1 else counter = counter + 1 end
   moveForward()
   smartDig("down"); smartDig("up"); smartDig("front")
-  if isFull() then trashRemoval(); if (arr[1] or 0) >= 14 then goHome("full") end end
+  if isFull() then
+    print("📦 Inventory full. Returning to deposit...")
+    depositAll()
+  end
 end
 
--- === MOVEMENT ===
 local function Bore()
-  while z < z0 - 3 do while not turtle.down() do turtle.digDown() end; z = z + 1 end
+  print("⬇️ Digging down " .. depth .. " blocks...")
+  for i = 1, depth do
+    while not turtle.down() do turtle.digDown(); sleep(0.05) end
+    z = z + 1
+  end
 end
 
 local function moveY()
@@ -223,7 +283,6 @@ local function quarry()
   end
 end
 
--- === FILL BACK ===
 local function fillWithCobblestone()
   print("🔧 Filling quarry with cobblestone...")
   for i = 1, 16 do
@@ -237,15 +296,11 @@ local function fillWithCobblestone()
   print("✅ Quarry filled with cobblestone.")
 end
 
--- === GO HOME ===
 local function goHome()
   print("Returning to start point...")
-  -- Go up to surface
   while z > 0 do turtle.up(); z = z - 1 end
-  -- Face forward and move to origin
   while y > 0 do if face == 2 then moveForward() else turn(1) end end
   while x > 0 do if face == 3 then moveForward() else turn(-1) end end
-  -- Restore starting direction
   while face ~= startFace do turn(1) end
   print("✅ Returned to starting position.")
   depositAll()
@@ -254,29 +309,36 @@ end
 -- === MASTER ROUTINE ===
 local function Mastermind()
   startFace = face
-  print("Starting mining at Y=" .. z0)
+  print("🚀 Starting FIYREX Quarry Miner")
   buildList()
   refuel()
+
   if turtle.getFuelLevel() < 500 then
     print("Not enough fuel. Insert more and wait...")
     repeat sleep(5); refuel() until turtle.getFuelLevel() >= 500
   end
 
   Bore()
-  for i = 0, fin - 3 do
+  for i = 0, depth - 3 do
     if i % 3 == 0 then
       turtle.digUp()
       quarry()
       if (w % 2) == 0 then rev = -rev end
-      trashRemoval()
+      depositAll()
     end
-    if i < fin - 3 then while not turtle.up() do turtle.digUp() end; z = z - 1 end
+    if i < depth - 3 then while not turtle.up() do turtle.digUp() end; z = z - 1 end
   end
-  trashRemoval()
+
   print("✅ Mining complete.")
 
   if promptYesNo("Would you like to fill the quarry with cobblestone?") then
-    fillWithCobblestone()
+    local cobbleNeeded = math.floor(l * w * depth * 0.75)
+    print("🧮 Estimated cobblestone needed: " .. cobbleNeeded)
+    if cobbleCheckAndRefill(cobbleNeeded) then
+      fillWithCobblestone()
+    else
+      print("❌ Could not verify cobblestone supply. Skipping fill.")
+    end
   else
     print("Skipped filling process.")
   end
