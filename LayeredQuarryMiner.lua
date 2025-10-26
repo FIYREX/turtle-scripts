@@ -1,19 +1,17 @@
 --[[
-LayeredQuarryMiner (Final Hybrid Version)
+LayeredQuarryMiner - Fixed Zone Edition (Front Chest)
 by FIYREX
 
 Features:
-✅ User-defined length, width, and depth (X,Z,Y)
-✅ Smart coordinate-based navigation (no diagonal descent)
-✅ Auto fuel check and refuel prompt
-✅ Back-chest detection before mining
-✅ Straight down mining (layer by layer)
-✅ Returns exactly to chest position
-✅ Auto unload when full
-✅ Safe nil checks, clean logic
+✅ Chest must be in front
+✅ Mines one fixed zone only (no offset on reruns)
+✅ If area below is already mined, prints "Quarry complete"
+✅ Smart fuel check and refueling
+✅ Auto unload to front chest
+✅ Accurate coordinates, vertical descent
 ]]
 
--- === Utility ===
+-- === Utilities ===
 local function say(m) print("[Quarry] " .. m) end
 local function warn(m) print("[WARN] " .. m) end
 
@@ -28,29 +26,25 @@ local depth = tonumber(read())
 local fuelSlot = 16
 
 -- === State ===
-local x, y, z = 0, 0, 0 -- current coordinates
+local x, y, z = 0, 0, 0
 local dir = 0 -- 0=N, 1=E, 2=S, 3=W
 
--- === Helper: Chest Check ===
+-- === Chest check (front) ===
 local function isChest(name)
   return name and (name:find("chest") or name:find("barrel"))
 end
 
-local function checkBackChest()
-  turtle.turnLeft()
-  turtle.turnLeft()
+local function checkFrontChest()
   local ok, data = turtle.inspect()
   if not ok or not isChest(data.name) then
-    warn("No chest detected behind! Place one and press Enter.")
+    warn("No chest detected in front! Place a chest and press Enter.")
     read()
   else
-    say("Detected chest behind: " .. data.name)
+    say("Detected chest in front: " .. data.name)
   end
-  turtle.turnLeft()
-  turtle.turnLeft()
 end
 
-checkBackChest()
+checkFrontChest()
 
 -- === Fuel Logic ===
 local function estimateFuel()
@@ -136,7 +130,7 @@ local function face(target)
   while dir ~= target do turnRight() end
 end
 
--- === Navigation (Absolute Coordinate) ===
+-- === Absolute Navigation ===
 local function goTo(tx, ty, tz, tdir)
   while y < ty do up() end
   while y > ty do down() end
@@ -160,14 +154,26 @@ end
 
 local function dropItems()
   local sx, sy, sz, sdir = x, y, z, dir
-  say("Inventory full — unloading at chest...")
-  goTo(0, 0, 0, 2)
+  say("Inventory full — unloading to front chest...")
+  face(2)
   for i = 1, 15 do
     turtle.select(i)
     turtle.drop()
   end
   turtle.select(1)
+  face(sdir)
   goTo(sx, sy, sz, sdir)
+end
+
+-- === Quarry Validation ===
+local function isGrounded()
+  local ok, _ = turtle.inspectDown()
+  return ok
+end
+
+if not isGrounded() then
+  warn("No block detected under start position. Quarry already complete.")
+  return
 end
 
 -- === Layer Mining ===
@@ -182,7 +188,6 @@ local function mineLayer()
       else turnLeft(); forward(); turnLeft() end
     end
   end
-  -- Return to start of layer
   if width % 2 == 1 then face(2) for i = 1, length - 1 do forward() end end
   face(3) for i = 1, width - 1 do forward() end
   face(0)
@@ -190,10 +195,22 @@ end
 
 -- === Mining Execution ===
 say("Starting mining...")
+
 turtle.digDown()
 down()
 
 for d = 1, depth do
+  if not isGrounded() then
+    say("No more ground — quarry already complete.")
+    goTo(0, 0, 0, 2)
+    for i = 1, 15 do
+      turtle.select(i)
+      turtle.drop()
+    end
+    say("Returning to chest. Mining finished.")
+    return
+  end
+
   say(("Mining layer %d/%d..."):format(d, depth))
   mineLayer()
   if d < depth then
