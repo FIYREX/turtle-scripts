@@ -37,27 +37,31 @@ return name:find("chest") or name:find("barrel")
 end
 
 
-local function waitForFrontChest()
+local function waitForBackChest()
 while true do
+turtle.turnLeft()
+turtle.turnLeft()
 local ok, data = turtle.inspect()
+turtle.turnLeft()
+turtle.turnLeft()
 if ok and isChest(data.name) then
-say("Detected deposit container in front: " .. data.name)
+say("Detected deposit container behind: " .. data.name)
 return true
 else
-warn("No chest/barrel in front. Place one and press Enter...")
+warn("No chest/barrel behind. Place one and press Enter...")
 read()
 end
 end
 end
 
 
-waitForFrontChest()
+waitForBackChest()
 
 
 -- ===== Whitelist / Blacklist =====
 local ORE_SUBSTRINGS = {
-"_ore", -- most vanilla/mod ores (iron_ore, deepslate_iron_ore, etc.)
-"ore_", -- some mods prefix
+"_ore",
+"ore_",
 }
 local ORE_EXACT = {
 ["minecraft:ancient_debris"] = true,
