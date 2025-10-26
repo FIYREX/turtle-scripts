@@ -1,15 +1,14 @@
 --[[
-LayeredQuarryMiner - Smart All-Side Chest Version
+LayeredQuarryMiner - Fixed Quarry Safe Chest Version
 by FIYREX
 
 Features:
-✅ Detects deposit chest on any side (not just front)
-✅ Mines the same quarry spot directly below the turtle
-✅ Continues deeper if same location re-run with higher depth
-✅ Stops gracefully if area is already mined (air below)
-✅ Auto unload: searches all sides for chest each time
-✅ Smart fuel system and safe descent
-✅ Never mines or destroys the chest
+✅ Chest stays in front (never mined)
+✅ Always mines the same quarry spot below turtle
+✅ Continues deeper if same dimensions used again
+✅ Stops if area is already mined (air below)
+✅ No wandering; single quarry zone
+✅ Smart fuel and auto unload to front chest
 ]]
 
 -- === Utility ===
@@ -27,30 +26,28 @@ local depth = tonumber(read())
 local fuelSlot = 16
 local dir = 0 -- 0=N,1=E,2=S,3=W
 local x, y, z = 0, 0, 0
-local chestDir = nil
+local chestDir = 0
+local chestPos = {x=0, y=0, z=0}
 
--- === Chest Detection (Any Side) ===
+-- === Chest Detection (Front Only) ===
 local function isChest(name)
   return name and (name:find("chest") or name:find("barrel"))
 end
 
-local function findChest()
-  for i = 0, 3 do
-    local ok, data = turtle.inspect()
-    if ok and isChest(data.name) then
-      chestDir = dir
-      say("Detected deposit chest on side " .. i)
-      return true
-    end
-    turtle.turnRight()
-    dir = (dir + 1) % 4
+local function checkFrontChest()
+  local ok, data = turtle.inspect()
+  if ok and isChest(data.name) then
+    chestDir = dir
+    chestPos = {x=x, y=y, z=z}
+    say("Deposit chest detected in front: " .. data.name)
+    return true
   end
-  warn("No chest found on any side! Place one near me and press Enter.")
+  warn("No chest detected in front! Place a chest and press Enter.")
   read()
-  return findChest()
+  return checkFrontChest()
 end
 
-findChest()
+checkFrontChest()
 
 -- === Fuel ===
 local function estimateFuel()
@@ -120,19 +117,22 @@ local function up()
   y = y + 1
 end
 
-local function turnLeft()
-  turtle.turnLeft()
-  dir = (dir - 1) % 4
-  if dir < 0 then dir = dir + 4 end
-end
+local function turnLeft() turtle.turnLeft() dir=(dir-1)%4 if dir<0 then dir=dir+4 end end
+local function turnRight() turtle.turnRight() dir=(dir+1)%4 end
+local function face(target) while dir~=target do turnRight() end end
 
-local function turnRight()
-  turtle.turnRight()
-  dir = (dir + 1) % 4
-end
+-- === Navigation ===
+local function goTo(tx, ty, tz, tdir)
+  while y < ty do up() end
+  while y > ty do down() end
 
-local function face(target)
-  while dir ~= target do turnRight() end
+  if x < tx then face(1) while x < tx do forward() end
+  elseif x > tx then face(3) while x > tx do forward() end end
+
+  if z < tz then face(0) while z < tz do forward() end
+  elseif z > tz then face(2) while z > tz do forward() end end
+
+  face(tdir or 0)
 end
 
 -- === Inventory ===
@@ -144,24 +144,22 @@ local function isInventoryFull()
 end
 
 local function depositToChest()
-  say("Depositing items...")
-  for i = 0, 3 do
-    local ok, data = turtle.inspect()
-    if ok and isChest(data.name) then
-      for slot = 1, 15 do
-        turtle.select(slot)
-        turtle.drop()
-      end
-      turtle.select(1)
-      say("Deposit complete on side " .. i)
-      return
+  say("Depositing items to front chest...")
+  goTo(chestPos.x, chestPos.y, chestPos.z, chestDir)
+  face(chestDir)
+  local ok, data = turtle.inspect()
+  if ok and isChest(data.name) then
+    for i = 1, 15 do
+      turtle.select(i)
+      turtle.drop()
     end
-    turtle.turnRight()
-    dir = (dir + 1) % 4
+    turtle.select(1)
+    say("Deposit complete.")
+  else
+    warn("Chest missing! Please place one in front and press Enter.")
+    read()
+    depositToChest()
   end
-  warn("No chest detected on any side for deposit! Place one and press Enter.")
-  read()
-  depositToChest()
 end
 
 -- === Ground Check ===
@@ -212,6 +210,6 @@ for d = 1, depth do
   end
 end
 
-say("Returning to chest for final deposit...")
+say("Returning to deposit chest...")
 depositToChest()
 say("All done. Returned to chest. Happy mining!")
