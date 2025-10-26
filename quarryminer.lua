@@ -1,5 +1,6 @@
--- === FIYREX QUARRY MINER (Auto-Y + Smart Priority + Fill Mode) ===
+-- === FIYREX QUARRY MINER (Manual-Y + Smart Priority + Return Home) ===
 -- Fully autonomous quarry system with tiered ore priorities and optional cobblestone fill-back.
+-- Now asks for Y-level manually and returns to the starting position after completion.
 
 -- === PROMPT HELPERS ===
 local function promptNumber(msg)
@@ -23,20 +24,9 @@ end
 -- === INPUTS ===
 local l = promptNumber("Quarry length:")
 local w = promptNumber("Quarry width:")
+local z0 = promptNumber("Enter starting Y-level (your current height):")
 
--- ⚙️ Auto-detect current Y if GPS available, else assume 64
-local z0 = 64
-if gps then
-  local x0, y0, zt = gps.locate(3)
-  if y0 then
-    z0 = y0
-  else
-    print("⚠️ GPS not found — using default Y: 64")
-  end
-else
-  print("⚠️ GPS API not available — using default Y: 64")
-end
-print("Starting Y-level detected as: " .. z0)
+print("Starting Y-level set to: " .. z0)
 
 local whitelist = promptYesNo("Use whitelist mode?")
 local digWholeChunk = promptYesNo("Dig the whole chunk?")
@@ -70,9 +60,8 @@ local mediumPriorityOres = {
   ["minecraft:deepslate_emerald_ore"] = true,
 }
 
--- === Custom Ore Tier 3 ===
 local customPriorityOres = {
-  -- Add any custom ores here, e.g.:
+  -- Add any custom ores here:
   -- ["minecraft:emerald_ore"] = true,
 }
 
@@ -83,6 +72,8 @@ local arr, trashtable = {0}, {}
 local cobble, stone = false, false
 local slot = 16
 local fuelName = nil
+local startX, startY, startZ, startFace = 0, 0, 0, 0
+
 do
   local d = turtle.getItemDetail(16)
   if d and d.name then fuelName = d.name end
@@ -144,16 +135,15 @@ local function buildList()
 end
 
 local function depositAll()
-  print("Depositing items...")
-  turtle.turnRight(); turtle.turnRight()
+  print("Depositing items at start point...")
   for i = 1, 16 do
     turtle.select(i)
     if i ~= 16 or not turtle.refuel(0) then turtle.drop() end
   end
-  turtle.turnLeft(); turtle.turnLeft(); turtle.select(1)
+  turtle.select(1)
 end
 
--- === SMART DIGGING SYSTEM ===
+-- === SMART DIGGING ===
 local function smartDig(where)
   local suc, dat
   if where == "up" then suc, dat = turtle.inspectUp()
@@ -170,7 +160,6 @@ local function smartDig(where)
   end
 end
 
--- === MINE LOGIC ===
 local function isFull()
   for i = 1, 15 do if turtle.getItemCount(i) == 0 then return false end end
   return true
@@ -210,7 +199,7 @@ local function mineStep()
   if isFull() then trashRemoval(); if (arr[1] or 0) >= 14 then goHome("full") end end
 end
 
--- === MOVEMENT CONTROL ===
+-- === MOVEMENT ===
 local function Bore()
   while z < z0 - 3 do while not turtle.down() do turtle.digDown() end; z = z + 1 end
 end
@@ -234,7 +223,7 @@ local function quarry()
   end
 end
 
--- === FILL BACK ROUTINE ===
+-- === FILL BACK ===
 local function fillWithCobblestone()
   print("🔧 Filling quarry with cobblestone...")
   for i = 1, 16 do
@@ -249,28 +238,30 @@ local function fillWithCobblestone()
 end
 
 -- === GO HOME ===
-local function goHome(state)
-  local xp, yp, zp, facep = x, y, z, face
+local function goHome()
+  print("Returning to start point...")
+  -- Go up to surface
+  while z > 0 do turtle.up(); z = z - 1 end
+  -- Face forward and move to origin
   while y > 0 do if face == 2 then moveForward() else turn(1) end end
   while x > 0 do if face == 3 then moveForward() else turn(-1) end end
-  while z > 0 do turtle.up(); z = z - 1 end
-  while face ~= 2 do turn(-1) end
-  if state == "fuel" then
-    print("Waiting for fuel… put fuel anywhere."); repeat sleep(5); refuel() until turtle.getFuelLevel() >= 500
-    state = "full"
-  end
-  if state == "full" then depositAll(); arr = {0}; state = "mine" end
-  if state == "comp" then depositAll(); while face ~= 0 do turn(1) end; error("✅ Quarry complete!") end
+  -- Restore starting direction
+  while face ~= startFace do turn(1) end
+  print("✅ Returned to starting position.")
+  depositAll()
 end
 
 -- === MASTER ROUTINE ===
 local function Mastermind()
+  startFace = face
+  print("Starting mining at Y=" .. z0)
   buildList()
   refuel()
   if turtle.getFuelLevel() < 500 then
     print("Not enough fuel. Insert more and wait...")
     repeat sleep(5); refuel() until turtle.getFuelLevel() >= 500
   end
+
   Bore()
   for i = 0, fin - 3 do
     if i % 3 == 0 then
@@ -283,14 +274,15 @@ local function Mastermind()
   end
   trashRemoval()
   print("✅ Mining complete.")
-  
+
   if promptYesNo("Would you like to fill the quarry with cobblestone?") then
     fillWithCobblestone()
   else
     print("Skipped filling process.")
   end
-  
-  goHome("comp")
+
+  goHome()
+  print("🏁 All tasks complete. Turtle ready for next operation.")
 end
 
 Mastermind()
