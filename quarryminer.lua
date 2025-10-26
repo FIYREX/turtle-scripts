@@ -153,10 +153,16 @@ end
 -- ====== MINING LOGIC ======
 local function mineCell()
   local dirs = {"up", "down"}
-  for _,dir in ipairs(dirs) do
-    local ok,data = (dir=="up") and turtle.inspectUp() or turtle.inspectDown()
-    if ok and isWhitelistedOre(data.name) then
-      if dir=="up" then turtle.digUp() else turtle.digDown() end
+  for _, dir in ipairs(dirs) do
+    local ok, data =
+      (dir == "up") and turtle.inspectUp() or turtle.inspectDown()
+
+    if ok and data and data.name and isWhitelistedOre(data.name) then
+      if dir == "up" then
+        turtle.digUp()
+      else
+        turtle.digDown()
+      end
     end
   end
 end
