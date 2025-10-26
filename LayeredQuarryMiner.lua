@@ -1,14 +1,14 @@
 --[[ 
-LayeredQuarryMiner - Safe Working Core (Back Chest)
+LayeredQuarryMiner - Final Stable Version
 by FIYREX
 
 Features:
 - Detect chest behind before start
-- Move forward into quarry (dig if blocked)
-- Mine width x height x depth (layered)
-- Basic ore whitelist logic (no crashes)
-- Safe nil checks
-- Automatically continues if front is clear
+- Automatically start forward (dig if blocked)
+- Layered quarry mining (Width × Height × Depth)
+- Ore whitelist mining (safe nil checks)
+- Smart fuel estimation & refueling
+- Returns home after mining
 ]]
 
 -- === Utilities ===
@@ -57,7 +57,6 @@ local function waitForBackChest()
     turtle.turnLeft(); turtle.turnLeft()
     if ok and isChest(data.name) then
       say("Detected deposit container behind: "..data.name)
-      face(0)
       return true
     else
       warn("No chest behind. Place one and press Enter.")
@@ -67,11 +66,13 @@ local function waitForBackChest()
 end
 
 waitForBackChest()
+-- Reset facing direction
+facing = 0
+face(0)
 
 -- === Ore whitelist ===
 local ORE_SUBS = {"_ore","ore_"}
 local ORE_EXACT = {["minecraft:ancient_debris"]=true}
-
 local function isOre(name)
   if not name then return false end
   if ORE_EXACT[name] then return true end
@@ -79,7 +80,7 @@ local function isOre(name)
   return false
 end
 
--- === Movement tracking ===
+-- === Position tracking ===
 local pos={x=0,y=0,z=0}
 
 local function safeInspect(fn)
@@ -88,10 +89,18 @@ local function safeInspect(fn)
   return false,nil
 end
 
+-- === Movement ===
 local function forward()
-  while not turtle.forward() do
+  local attempts = 0
+  while not turtle.forward() and attempts < 5 do
     local ok,name = safeInspect(turtle.inspect)
-    if ok then turtle.dig() else os.sleep(0.1) end
+    if ok then
+      say("Digging: " .. name)
+      turtle.dig()
+    else
+      os.sleep(0.2)
+    end
+    attempts = attempts + 1
   end
   if facing==0 then pos.x=pos.x+1
   elseif facing==1 then pos.z=pos.z+1
@@ -103,6 +112,7 @@ local function up()
   while not turtle.up() do local ok,name=safeInspect(turtle.inspectUp) if ok then turtle.digUp() end end
   pos.y=pos.y+1
 end
+
 local function down()
   while not turtle.down() do local ok,name=safeInspect(turtle.inspectDown) if ok then turtle.digDown() end end
   pos.y=pos.y-1
@@ -110,7 +120,6 @@ end
 
 -- === Mine cell ===
 local function mineCell()
-  -- mine up/down if ore
   local dirs={turtle.inspectUp,turtle.inspectDown}
   for i,fn in ipairs(dirs) do
     local ok,name=safeInspect(fn)
@@ -119,6 +128,37 @@ local function mineCell()
     end
   end
 end
+
+-- === Fuel estimation ===
+local function estimateFuel(w,h,d)
+  -- Rough estimate: each cell mined ~2 moves, plus return trip
+  local moves = (w * h * d * 2) + (w + d + h)
+  return math.ceil(moves * 1.15)
+end
+
+local function ensureFuel(required)
+  local fuel = turtle.getFuelLevel()
+  if fuel == "unlimited" then
+    say("Fuel not required (creative turtle).")
+    return true
+  end
+  say("Current fuel: " .. fuel .. " | Required: " .. required)
+  if fuel < required then
+    warn("Not enough fuel! Insert fuel and press Enter to refuel.")
+    read()
+    for i=1,16 do turtle.select(i) turtle.refuel(64) end
+    fuel = turtle.getFuelLevel()
+    say("Refueled. New fuel level: " .. fuel)
+    if fuel < required then
+      warn("Warning: still not enough fuel. The turtle may not return home safely.")
+    end
+  else
+    say("Fuel sufficient to complete quarry.")
+  end
+end
+
+local estimatedFuel = estimateFuel(W,H,D)
+ensureFuel(estimatedFuel)
 
 -- === Serpentine mining ===
 local function serpentineLayer(w,d)
@@ -140,21 +180,18 @@ end
 -- === Start mining ===
 say("Starting mining sequence...")
 
--- If block in front, dig it once, then continue
+-- Dig if front blocked
 local okFront, dataFront = turtle.inspect()
 if okFront then
   say("Front blocked by: " .. (dataFront.name or "unknown block") .. " — digging...")
   turtle.dig()
 end
 
--- Move into quarry
-if not turtle.forward() then
-  local okNext, dataNext = turtle.inspect()
-  if okNext then turtle.dig() end
-  turtle.forward()
-end
+-- Move forward into quarry
+turtle.forward()
+pos.x = pos.x + 1
 
--- Begin mining layers
+-- Mine all layers
 for layer=1,H do
   say(("Mining layer %d/%d..."):format(layer,H))
   serpentineLayer(W,D)
@@ -164,12 +201,12 @@ for layer=1,H do
   end
 end
 
--- === Return to start ===
+-- === Return Home ===
 say("Returning home...")
 face(2)
-for _=1,pos.x do forward() end
+for _=1,pos.x-1 do forward() end
 face(3)
 for _=1,pos.z do forward() end
 while pos.y>0 do down() end
 face(0)
-say("All done. Happy mining!")
+say("All done!")
