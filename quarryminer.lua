@@ -1,7 +1,6 @@
--- === FIYREX QUARRY MINER v2.5 ===
--- Depth-based autonomous mining turtle with Layered Quarry Logic,
--- Smart Chest Detection, and Cobblestone Assurance System (CAS)
--- Created by FIYREX ⚙️
+-- === FIYREX QUARRY MINER v3.1 ===
+-- Layered mining, chest detection, auto return, and cobblestone fill after completion.
+-- Author: FIYREX ⚙️ (2025)
 
 -- === PROMPT HELPERS ===
 local function promptNumber(msg)
@@ -22,282 +21,158 @@ local function promptYesNo(msg)
   return (a == "y" or a == "yes")
 end
 
--- === INPUTS ===
-local l = promptNumber("Quarry length:")
-local w = promptNumber("Quarry width:")
-local depth = promptNumber("Quarry depth (how many blocks down to dig):")
+-- === USER INPUT ===
+local length = promptNumber("Enter quarry length:")
+local width = promptNumber("Enter quarry width:")
+local depth = promptNumber("Enter quarry depth (how many layers to dig):")
 
-print("Mining will go " .. depth .. " blocks deep from current position.")
+print("Quarry set: " .. length .. "×" .. width .. "×" .. depth)
 
-local whitelist = promptYesNo("Use whitelist mode?")
-local digWholeChunk = promptYesNo("Dig the whole chunk?")
-
--- === VARIABLES ===
-local x, y, z = 0, 0, 0
-local face, rev, counter = 0, 1, 0
-local arr, trashtable = {0}, {}
-local cobble, stone = false, false
-local slot = 16
+-- === STATE VARIABLES ===
+local face = 0
+local homeFace = 0
+local z = 0
+local cobbleReserve = math.floor(length * width * depth * 0.75)
 local fuelName = nil
-local startFace = 0
-local homeX, homeY, homeZ, homeFace = 0, 0, 0, 0
-
--- Cobblestone Reserve Logic
 local cobbleCount = 0
-local cobbleReserve = math.floor(l * w * depth * 0.75)
-print("Cobblestone reserve target for fill: " .. cobbleReserve .. " blocks.")
 
--- === ORE PRIORITY TABLES ===
-local highPriorityOres = {
-  ["minecraft:iron_ore"] = true,
-  ["minecraft:copper_ore"] = true,
-  ["minecraft:gold_ore"] = true,
-  ["minecraft:deepslate_iron_ore"] = true,
-  ["minecraft:deepslate_copper_ore"] = true,
-  ["minecraft:deepslate_gold_ore"] = true,
-  ["minecraft:diamond_ore"] = true,
-  ["minecraft:deepslate_diamond_ore"] = true,
+local ores = {
+  high = {
+    "minecraft:iron_ore", "minecraft:copper_ore", "minecraft:gold_ore",
+    "minecraft:deepslate_iron_ore", "minecraft:deepslate_copper_ore",
+    "minecraft:deepslate_gold_ore", "minecraft:diamond_ore", "minecraft:deepslate_diamond_ore"
+  },
+  medium = {
+    "minecraft:redstone_ore", "minecraft:deepslate_redstone_ore",
+    "minecraft:lapis_ore", "minecraft:deepslate_lapis_ore",
+    "minecraft:nether_quartz_ore", "minecraft:ancient_debris"
+  }
 }
 
-local mediumPriorityOres = {
-  ["minecraft:redstone_ore"] = true,
-  ["minecraft:deepslate_redstone_ore"] = true,
-  ["minecraft:lapis_ore"] = true,
-  ["minecraft:deepslate_lapis_ore"] = true,
-  ["minecraft:nether_quartz_ore"] = true,
-  ["minecraft:ancient_debris"] = true,
-}
+-- === MOVEMENT & FUEL ===
+local function turnRight() turtle.turnRight(); face = (face + 1) % 4 end
+local function turnLeft() turtle.turnLeft(); face = (face - 1) % 4 if face < 0 then face = 3 end end
 
-local customPriorityOres = {
-  -- Add any custom ores here
-  -- ["minecraft:emerald_ore"] = true,
-}
-
--- === INITIALIZATION ===
-do
-  local d = turtle.getItemDetail(16)
-  if d and d.name then fuelName = d.name end
-end
-
--- === CORE HELPERS ===
 local function refuel()
-  if turtle.getFuelLevel() >= 500 then return end
-  for i = 1, 16 do
-    local d = turtle.getItemDetail(i)
-    if d and (not fuelName or d.name == fuelName) then
-      turtle.select(i)
-      while turtle.getItemCount() > 0 and turtle.getFuelLevel() < 500 do
-        turtle.refuel(1)
-      end
-      if not fuelName then fuelName = d.name end
-      if turtle.getFuelLevel() >= 500 then
-        turtle.select(1)
-        return
-      end
-    end
-  end
-end
-
-local function turn(dir)
-  if dir == 1 then
-    turtle.turnRight(); face = (face + 1) % 4
-  elseif dir == -1 then
-    turtle.turnLeft(); face = face - 1
-    if face < 0 then face = face + 4 end
-  end
-end
-
-local function moveForward()
-  refuel()
-  while not turtle.forward() do turtle.dig(); sleep(0.05) end
-  if face == 0 then y = y + 1
-  elseif face == 1 then x = x + 1
-  elseif face == 2 then y = y - 1
-  elseif face == 3 then x = x - 1 end
-end
-
--- === ITEM HANDLING ===
-local function buildList()
-  for i = 1, 15 do
+  if turtle.getFuelLevel() >= 200 then return end
+  for i=1,16 do
     if turtle.getItemCount(i) > 0 then
       local d = turtle.getItemDetail(i)
-      if d and d.name then
-        trashtable[i] = d.name
-        if d.name == "minecraft:cobblestone" then cobble = true end
-        if d.name == "minecraft:stone" then stone = true end
+      if d and (d.name:find("coal") or d.name:find("lava_bucket")) then
+        turtle.select(i)
+        turtle.refuel(1)
+        if turtle.getFuelLevel() > 200 then return end
       end
-    else slot = i; break end
+    end
   end
-  print("Item list captured.")
 end
 
--- === SMART CHEST DEPOSIT ===
-local function depositAll()
+local function safeForward()
+  refuel()
+  while not turtle.forward() do turtle.dig(); sleep(0.1) end
+end
+
+local function safeDown()
+  refuel()
+  while not turtle.down() do turtle.digDown(); sleep(0.1) end
+  z = z + 1
+end
+
+local function safeUp()
+  while not turtle.up() do turtle.digUp(); sleep(0.1) end
+  z = z - 1
+end
+
+-- === CHEST DEPOSIT ===
+local function depositToChest()
   print("📦 Depositing items...")
   local hasChest, data = turtle.inspect()
-  local chestFound = hasChest and data.name:find("chest")
-
-  for i = 1, 16 do
-    local d = turtle.getItemDetail(i)
-    if d then
-      if d.name == "minecraft:cobblestone" and cobbleCount < cobbleReserve then
-        -- Keep cobblestone until reserve met
-      else
-        turtle.select(i)
-        if chestFound then turtle.drop() else turtle.drop() end
-      end
+  if hasChest and data.name:find("chest") then
+    for i=1,16 do
+      turtle.select(i)
+      if i ~= 16 or not turtle.refuel(0) then turtle.drop() end
     end
+    print("✅ Items deposited into chest.")
+  else
+    print("⚠️ No chest detected. Dropping items forward.")
+    for i=1,16 do turtle.select(i); turtle.drop() end
   end
   turtle.select(1)
-  print(chestFound and "✅ Deposited into chest." or "⚠️ No chest found, items dropped forward.")
 end
 
--- === SMART DIGGING ===
-local function smartDig(where)
-  local suc, dat
-  if where == "up" then suc, dat = turtle.inspectUp()
-  elseif where == "down" then suc, dat = turtle.inspectDown()
-  else suc, dat = turtle.inspect() end
-
-  if suc and dat and dat.name then
-    if highPriorityOres[dat.name] or mediumPriorityOres[dat.name] or customPriorityOres[dat.name] then
-      print("⛏️ Mining valuable ore: " .. dat.name)
-      if where == "up" then while turtle.digUp() do sleep(0.05) end
-      elseif where == "down" then while turtle.digDown() do sleep(0.05) end
-      else while turtle.dig() do sleep(0.05) end end
-    end
-  end
-end
-
--- === COBBLE REFILL SYSTEM ===
-local function cobbleCheckAndRefill(cobbleNeeded)
-  print("🔍 Checking cobblestone inventory for fill...")
-  local cobbleCount = 0
-  for i = 1, 16 do
+-- === INVENTORY UTILITIES ===
+local function countCobble()
+  local total = 0
+  for i=1,16 do
     local d = turtle.getItemDetail(i)
     if d and d.name == "minecraft:cobblestone" then
-      cobbleCount = cobbleCount + turtle.getItemCount(i)
+      total = total + turtle.getItemCount(i)
     end
   end
+  return total
+end
 
-  if cobbleCount >= cobbleNeeded then
-    print("✅ Enough cobblestone available: " .. cobbleCount)
-    return true
-  end
-
-  local missing = cobbleNeeded - cobbleCount
-  print("⚠️ Not enough cobblestone. Need " .. missing .. " more blocks.")
-
-  local hasChest, chestData = turtle.inspect()
-  if hasChest and chestData.name:find("chest") then
-    print("📦 Chest detected in front. Attempting to pull cobblestone...")
-    while missing > 0 do
-      if turtle.suck() then
-        cobbleCount = 0
-        for i = 1, 16 do
-          local d = turtle.getItemDetail(i)
-          if d and d.name == "minecraft:cobblestone" then
-            cobbleCount = cobbleCount + turtle.getItemCount(i)
-          end
-        end
-        missing = cobbleNeeded - cobbleCount
-        if missing <= 0 then
-          print("✅ Cobblestone refill complete!")
-          return true
-        end
-      else
-        print("⏳ Waiting for cobblestone in chest... still need " .. missing)
-        sleep(5)
-      end
-    end
-  else
-    print("❌ No chest found. Please supply cobblestone manually.")
-    repeat
-      sleep(5)
-      local current = 0
-      for i = 1, 16 do
-        local d = turtle.getItemDetail(i)
-        if d and d.name == "minecraft:cobblestone" then
-          current = current + turtle.getItemCount(i)
-        end
-      end
-      missing = cobbleNeeded - current
-    until missing <= 0
+local function inventoryFull()
+  for i=1,15 do
+    if turtle.getItemCount(i) == 0 then return false end
   end
   return true
 end
 
+-- === ORE DETECTION ===
+local function isValuable(block)
+  if not block then return false end
+  for _,v in pairs(ores.high) do if block.name == v then return true end end
+  for _,v in pairs(ores.medium) do if block.name == v then return true end end
+  return false
+end
+
+local function smartDig()
+  local s,d = turtle.inspect()
+  if s and isValuable(d) then turtle.dig() end
+  local sU,dU = turtle.inspectUp()
+  if sU and isValuable(dU) then turtle.digUp() end
+  local sD,dD = turtle.inspectDown()
+  if sD and isValuable(dD) then turtle.digDown() end
+end
+
+-- === RETURN HOME ===
+local function returnHome()
+  print("🏠 Returning to base...")
+  while z > 0 do safeUp() end
+  while face ~= homeFace do turnRight() end
+  print("✅ Arrived at base.")
+  depositToChest()
+end
+
 -- === MINING CORE ===
-local function checkfuel()
-  refuel()
-  local need = (x + y + z) + (l * w)
-  if turtle.getFuelLevel() < need then
-    print("⚠️ Low fuel. Waiting for refill...")
-    repeat sleep(5); refuel() until turtle.getFuelLevel() >= need
-  end
-end
-
-local function mineStep()
-  checkfuel()
-  moveForward()
-  smartDig("down"); smartDig("up"); smartDig("front")
-end
-
-local function moveY()
-  if y == 0 then
-    while y < l - 1 do mineStep(); y = y + 1 end
-  else
-    while y > 0 do mineStep(); y = y - 1 end
-  end
-end
-
-local function quarry()
-  refuel()
-  for i = 0, w - 1 do
-    moveY()
-    if i < w - 1 then
-      if (i % 2) == 0 then turn(1) else turn(-1) end
-      mineStep()
+local function mineLayer()
+  for w=1,width do
+    for l=1,length-1 do
+      smartDig()
+      safeForward()
+    end
+    if w < width then
+      if w % 2 == 1 then turnRight(); smartDig(); safeForward(); turnRight()
+      else turnLeft(); smartDig(); safeForward(); turnLeft() end
     end
   end
-end
 
--- === RETURN TO BASE ===
-local function goHome()
-  print("🔙 Returning to base...")
-
-  while z > 0 do
-    if not turtle.up() then turtle.digUp(); sleep(0.05) end
-    z = z - 1
-  end
-
-  while y > 0 do if face ~= 2 then while face ~= 2 do turn(1) end end; moveForward(); y = y - 1 end
-  while x > 0 do if face ~= 3 then while face ~= 3 do turn(1) end end; moveForward(); x = x - 1 end
-  while face ~= homeFace do turn(1) end
-
-  print("✅ Turtle returned to base.")
-
-  local hasChest, data = turtle.inspect()
-  if hasChest and data.name:find("chest") then
-    print("📦 Chest detected! Depositing directly...")
-    for i = 1, 16 do
-      turtle.select(i)
-      if i ~= 16 or not turtle.refuel(0) then turtle.drop() end
-    end
-    print("✅ Deposit complete.")
+  -- return to start corner
+  if width % 2 == 1 then
+    turnRight(); turnRight()
+    for i=1,length-1 do safeForward() end
+    turnRight(); for i=1,width-1 do safeForward() end; turnRight()
   else
-    print("⚠️ No chest detected. Dropping items forward.")
-    for i = 1, 16 do turtle.select(i); turtle.drop() end
+    for i=1,width-1 do safeForward() end
+    turnRight(); turnRight()
   end
-
-  turtle.select(1)
-  print("🏁 Turtle parked at base and ready.")
 end
 
 -- === FILL-BACK ===
 local function fillWithCobblestone()
   print("🔧 Filling quarry with cobblestone...")
-  for i = 1, 16 do
+  for i=1,16 do
     local d = turtle.getItemDetail(i)
     if d and d.name == "minecraft:cobblestone" then
       turtle.select(i)
@@ -308,44 +183,46 @@ local function fillWithCobblestone()
   print("✅ Quarry filled with cobblestone.")
 end
 
--- === MAIN EXECUTION ===
+-- === MAIN ROUTINE ===
 local function Mastermind()
-  startFace = face
-  homeX, homeY, homeZ, homeFace = x, y, z, face
-  print("🚀 Starting FIYREX Quarry Miner (Layered Mode)")
-  buildList()
-  refuel()
+  homeFace = face
+  print("🚀 FIYREX QUARRY MINER v3.1")
+  print("Starting layered mining...")
 
-  -- === LAYERED QUARRY LOGIC ===
-  for currentDepth = 1, depth do
-    print("⛏️ Mining layer " .. currentDepth .. " of " .. depth)
-    quarry()
-    depositAll()
+  for layer=1,depth do
+    print("⛏️ Mining layer " .. layer .. " of " .. depth)
+    mineLayer()
 
-    if currentDepth < depth then
-      print("⬇️ Descending to next layer...")
-      if not turtle.down() then
-        while not turtle.down() do turtle.digDown(); sleep(0.05) end
-      end
-      z = z + 1
+    if inventoryFull() then
+      print("📦 Inventory full! Returning to deposit...")
+      returnHome()
+      print("🔁 Returning to quarry...")
+      for i=1,layer do safeDown() end
+    end
+
+    if layer < depth then
+      print("⬇️ Moving down to next layer...")
+      safeDown()
     end
   end
 
-  print("✅ Excavation complete.")
+  print("✅ Excavation complete!")
+  returnHome()
+
+  -- === ASK FILL AFTER COMPLETION ===
+  local cobbleTotal = countCobble()
+  print("Cobblestone available: " .. cobbleTotal .. " / " .. cobbleReserve)
   if promptYesNo("Would you like to fill the quarry with cobblestone?") then
-    local cobbleNeeded = math.floor(l * w * depth * 0.75)
-    print("🧮 Estimated cobblestone needed: " .. cobbleNeeded)
-    if cobbleCheckAndRefill(cobbleNeeded) then
+    if cobbleTotal >= cobbleReserve then
       fillWithCobblestone()
     else
-      print("❌ Could not verify cobblestone supply. Skipping fill.")
+      print("⚠️ Not enough cobblestone for full fill. Skipping.")
     end
   else
     print("Skipped filling process.")
   end
 
-  goHome()
-  print("🏁 All tasks complete. Turtle ready for next operation.")
+  print("🏁 Operation complete. Turtle parked at base.")
 end
 
 Mastermind()
