@@ -66,6 +66,8 @@ local mediumPriorityOres = {
   ["minecraft:deepslate_lapis_ore"] = true,
   ["minecraft:nether_quartz_ore"] = true,
   ["minecraft:ancient_debris"] = true,
+  ["minecraft:emerald_ore"] = true,
+  ["minecraft:deepslate_emerald_ore"] = true,
 }
 
 -- === Custom Ore Tier 3 ===
