@@ -2,12 +2,13 @@
 LayeredQuarryMiner - Safe Working Core (Back Chest)
 by FIYREX
 
-Features confirmed working:
+Features:
 - Detect chest behind before start
-- Move forward into quarry
+- Move forward into quarry (dig if blocked)
 - Mine width x height x depth (layered)
 - Basic ore whitelist logic (no crashes)
 - Safe nil checks
+- Automatically continues if front is clear
 ]]
 
 -- === Utilities ===
@@ -66,13 +67,6 @@ local function waitForBackChest()
 end
 
 waitForBackChest()
-
--- === Check front clear ===
-local okf,_ = turtle.inspect()
-if okf then
-  warn("Front blocked! Clear it and press Enter.")
-  read()
-end
 
 -- === Ore whitelist ===
 local ORE_SUBS = {"_ore","ore_"}
@@ -145,17 +139,37 @@ end
 
 -- === Start mining ===
 say("Starting mining sequence...")
-forward() -- step into quarry
+
+-- If block in front, dig it once, then continue
+local okFront, dataFront = turtle.inspect()
+if okFront then
+  say("Front blocked by: " .. (dataFront.name or "unknown block") .. " — digging...")
+  turtle.dig()
+end
+
+-- Move into quarry
+if not turtle.forward() then
+  local okNext, dataNext = turtle.inspect()
+  if okNext then turtle.dig() end
+  turtle.forward()
+end
+
+-- Begin mining layers
 for layer=1,H do
   say(("Mining layer %d/%d..."):format(layer,H))
   serpentineLayer(W,D)
-  if layer<H then down() end
+  if layer<H then
+    say("Descending to next layer...")
+    down()
+  end
 end
 
--- === Return ===
+-- === Return to start ===
 say("Returning home...")
-face(2); for _=1,pos.x do forward() end
-face(3); for _=1,pos.z do forward() end
+face(2)
+for _=1,pos.x do forward() end
+face(3)
+for _=1,pos.z do forward() end
 while pos.y>0 do down() end
 face(0)
 say("All done. Happy mining!")
