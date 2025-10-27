@@ -1,10 +1,10 @@
 -- ======================================================
--- Smart Column Stack Miner v5.5
+-- Smart Quarry Miner v5.6
 -- FIYREX + GPT-5
 --
--- Mines a perfect rectangular quarry in vertical columns.
--- Pattern: Down → Up → Move 1 → Down → Up → repeat.
--- Fully aligned grid with consistent east-west and south movement.
+-- Pattern: "Snake" (Row-by-Row)
+-- Starts bottom-left, mines across row, moves up 1, reverses, repeat.
+-- Each ⬜ = one full vertical column.
 -- ======================================================
 
 -- === Utility ===
@@ -24,33 +24,19 @@ local PROGRESS_FILE = "progress.txt"
 local FUEL_SLOT = 1
 local LENGTH, WIDTH, HEIGHT = 0, 0, 0
 local CHEST_SIDE = "right"
-local blocksMined, depositedCount = 0, 0
 local minerId = "Miner-1"
-local posX, posZ, facing = 0, 0, 0
-local currentX, currentZ, currentDepth = 1, 1, 0
-local speaker = peripheral.find("speaker")
+local blocksMined, depositedCount = 0, 0
+local facing = 1  -- 0=N, 1=E, 2=S, 3=W
 
--- === Progress ===
-local function saveProgress(x, z)
-  local f = fs.open(PROGRESS_FILE, "w")
-  f.write(textutils.serialize({x=x, z=z}))
-  f.close()
-end
-local function loadProgress()
-  if fs.exists(PROGRESS_FILE) then
-    local f = fs.open(PROGRESS_FILE, "r")
-    local data = textutils.unserialize(f.readAll())
-    f.close()
-    return data
-  end
-  return nil
-end
-local function clearProgress() if fs.exists(PROGRESS_FILE) then fs.delete(PROGRESS_FILE) end end
+-- === Tracking ===
+local posX, posZ = 0, 0
 
 -- === Movement Helpers ===
 local function turnRight() turtle.turnRight(); facing=(facing+1)%4 end
 local function turnLeft()  turtle.turnLeft();  facing=(facing+3)%4 end
-local function faceDirection(dir) while facing~=dir do turnLeft() end end
+local function faceDirection(dir)
+  while facing~=dir do turnLeft() end
+end
 
 local function moveForwardSafe()
   while not turtle.forward() do
@@ -71,47 +57,7 @@ local function moveDownSafe()
 end
 
 local function moveUpSafe()
-  while not turtle.up() do
-    sleep(0.1)
-  end
-end
-
--- === Return to Start ===
-local function returnToStart()
-  print("Returning to chest...")
-  if posZ > 0 then faceDirection(0)
-  elseif posZ < 0 then faceDirection(2) end
-  for _=1,math.abs(posZ) do moveForwardSafe() end
-  posZ=0
-
-  if posX > 0 then faceDirection(3)
-  elseif posX < 0 then faceDirection(1) end
-  for _=1,math.abs(posX) do moveForwardSafe() end
-  posX=0
-  faceDirection(0)
-end
-
--- === Inventory ===
-local function isFull()
-  for i=2,16 do if turtle.getItemCount(i)==0 then return false end end
-  return true
-end
-local function deposit()
-  print("Depositing items...")
-  if CHEST_SIDE=="right" then turtle.turnRight()
-  elseif CHEST_SIDE=="left" then turtle.turnLeft()
-  elseif CHEST_SIDE=="back" then turtle.turnRight(); turtle.turnRight() end
-  for i=2,16 do
-    turtle.select(i)
-    local count=turtle.getItemCount(i)
-    if count>0 then
-      if turtle.drop() then depositedCount=depositedCount+count end
-    end
-  end
-  if CHEST_SIDE=="right" then turtle.turnLeft()
-  elseif CHEST_SIDE=="left" then turtle.turnRight()
-  elseif CHEST_SIDE=="back" then turtle.turnRight(); turtle.turnRight() end
-  turtle.select(2)
+  while not turtle.up() do sleep(0.1) end
 end
 
 -- === Bedrock Check ===
@@ -121,34 +67,62 @@ local function isBedrockBelow()
   return false
 end
 
--- === Fuel ===
+-- === Return to Start ===
+local function returnToStart()
+  print("Returning to chest...")
+  if posX > 0 then faceDirection(3) for _=1,posX do moveForwardSafe() end posX=0 end
+  if posZ > 0 then faceDirection(0) for _=1,posZ do moveForwardSafe() end posZ=0 end
+  faceDirection(1)
+end
+
+-- === Fuel & Inventory ===
 local function calcFuelNeed(l,w,h)
   return (l*w*h)*2 + 100
 end
+
 local function checkFuel(required)
-  local fuel = turtle.getFuelLevel()
-  if fuel == "unlimited" then return end
-  while fuel < required do
-    print(("Fuel Low: %d / %d"):format(fuel, required))
+  local fuel=turtle.getFuelLevel()
+  if fuel=="unlimited" then return end
+  while fuel<required do
+    print(("Fuel Low: %d/%d"):format(fuel,required))
     turtle.select(FUEL_SLOT)
     if not turtle.refuel(1) then print("Add fuel in slot 1."); sleep(3) end
-    fuel = turtle.getFuelLevel()
+    fuel=turtle.getFuelLevel()
   end
 end
 
--- === Column Mining ===
+local function isFull()
+  for i=2,16 do if turtle.getItemCount(i)==0 then return false end end
+  return true
+end
+
+local function deposit()
+  print("Depositing items...")
+  if CHEST_SIDE=="right" then turtle.turnRight()
+  elseif CHEST_SIDE=="left" then turtle.turnLeft()
+  elseif CHEST_SIDE=="back" then turtle.turnRight(); turtle.turnRight() end
+
+  for i=2,16 do
+    turtle.select(i)
+    if turtle.getItemCount(i)>0 then turtle.drop() end
+  end
+
+  if CHEST_SIDE=="right" then turtle.turnLeft()
+  elseif CHEST_SIDE=="left" then turtle.turnRight()
+  elseif CHEST_SIDE=="back" then turtle.turnRight(); turtle.turnRight() end
+
+  turtle.select(2)
+end
+
+-- === Mining Logic ===
 local function mineColumn(depth)
   for d=1,depth do
-    currentDepth=d
-    if isBedrockBelow() then
-      print("Bedrock reached.")
-      for _=1,d-1 do moveUpSafe() end
-      return
-    end
+    if isBedrockBelow() then print("Bedrock reached."); break end
     turtle.digDown()
     moveDownSafe()
     blocksMined=blocksMined+1
     if isFull() then
+      print("Inventory full, returning to deposit.")
       for _=1,d do moveUpSafe() end
       returnToStart()
       deposit()
@@ -160,46 +134,41 @@ end
 
 -- === Main ===
 term.clear(); term.setCursorPos(1,1)
-print("=== Smart Column Stack Miner v5.5 ===")
+print("=== Smart Quarry Miner v5.6 ===")
 
-LENGTH=tonumber(prompt("Enter length:"))
-WIDTH=tonumber(prompt("Enter width:"))
-HEIGHT=tonumber(prompt("Enter depth:"))
+LENGTH=promptNumber("Enter length:")
+WIDTH=promptNumber("Enter width:")
+HEIGHT=promptNumber("Enter depth:")
 CHEST_SIDE=prompt("Chest side (left/right/back):")
 minerId=prompt("Miner ID (e.g., Miner-1):")
 
-local prev=loadProgress()
-if prev then
-  print(("Resume from X:%d Z:%d? (yes/no): "):format(prev.x,prev.z))
-  local opt=read()
-  if opt=="no" then clearProgress(); prev=nil end
-end
+checkFuel(calcFuelNeed(LENGTH,WIDTH,HEIGHT))
+print("Fuel check complete. Starting mining...")
 
-local needed=calcFuelNeed(LENGTH,WIDTH,HEIGHT)
-checkFuel(needed)
-print(("Fuel OK. Needed: %d"):format(needed))
-
--- === Grid Mining (Perfect Alignment) ===
-for z=(prev and prev.z or 1),WIDTH do
-  -- Always start each row facing east
-  faceDirection(1)
-  for x=(prev and prev.x or 1),LENGTH do
-    currentX, currentZ = x, z
-    print(("Mining column X:%d Z:%d"):format(x, z))
+-- Snake pattern mining
+for row=1,WIDTH do
+  print(("Row %d/%d..."):format(row,WIDTH))
+  for col=1,LENGTH do
+    print(("Mining column %d/%d"):format(col,LENGTH))
     mineColumn(HEIGHT)
-    saveProgress(x, z)
-    if x < LENGTH then moveForwardSafe() end
+    if col < LENGTH then moveForwardSafe() end
   end
 
-  -- End of row: move one south for next line
-  if z < WIDTH then
-    faceDirection(2)
-    moveForwardSafe()
+  -- Move to next row (north) if not finished
+  if row < WIDTH then
+    if row % 2 == 1 then  -- currently facing east
+      turnLeft()
+      moveForwardSafe()
+      turnLeft()
+    else  -- currently facing west
+      turnRight()
+      moveForwardSafe()
+      turnRight()
+    end
   end
 end
 
 returnToStart()
 deposit()
-clearProgress()
 print("✅ Quarry complete. Returned to chest.")
 if speaker then pcall(function() speaker.playNote("bell",3,12) end) end
