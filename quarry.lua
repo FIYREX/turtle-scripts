@@ -1,16 +1,10 @@
 -- ======================================================
--- Smart Column Stack Miner v5.4
+-- Smart Column Stack Miner v5.4.1
 -- FIYREX + GPT-5
 --
--- Mines each column straight down and up in a fixed grid.
+-- Mines each column straight down & up in a clean grid pattern.
 -- Pattern: Down → Up → Step Forward → Down → Up → Repeat.
 --
--- Features:
---  ✅ Straight column mining (no zig-zag)
---  ✅ Length × Width × Height
---  ✅ Auto-return to chest after finish/deposit
---  ✅ Resume-safe (column tracking)
---  ✅ Full telemetry & refuel logic
 -- ======================================================
 
 -- === Utilities ===
@@ -32,15 +26,13 @@ local PROGRESS_FILE = "progress.txt"
 local FUEL_SLOT = 1
 local LENGTH, WIDTH, HEIGHT = 0, 0, 0
 local CHEST_SIDE = "right"
-local blocksMined = 0
-local depositedCount = 0
+local blocksMined, depositedCount = 0, 0
 local minerId = "Miner-1"
 
--- === Tracking ===
+-- === Position Tracking ===
 local posX, posZ = 0, 0
-local facing = 0  -- 0=N,1=E,2=S,3=W
-local currentX, currentZ = 1, 1
-local currentDepth = 0
+local facing = 0 -- 0=N,1=E,2=S,3=W
+local currentX, currentZ, currentDepth = 1, 1, 0
 
 -- === Telemetry ===
 local modemType, modemSide = "none", nil
@@ -69,13 +61,16 @@ local function loadProgress()
   end
   return nil
 end
-local function clearProgress() if fs.exists(PROGRESS_FILE) then fs.delete(PROGRESS_FILE) end end
+local function clearProgress()
+  if fs.exists(PROGRESS_FILE) then fs.delete(PROGRESS_FILE) end
+end
 
 -- === Movement Helpers ===
 local function turnRight() turtle.turnRight(); facing=(facing+1)%4 end
 local function turnLeft()  turtle.turnLeft();  facing=(facing+3)%4 end
-local function faceNorth() while facing~=0 do turnLeft() end end
-
+local function faceDirection(dir)
+  while facing ~= dir do turnLeft() end
+end
 local function moveForwardSafe()
   while not turtle.forward() do
     turtle.dig()
@@ -88,9 +83,6 @@ local function moveForwardSafe()
 end
 
 -- === Return to Chest ===
-local function faceDirection(dir)
-  while facing ~= dir do turnLeft() end
-end
 local function returnToStart()
   print("Returning to chest...")
   if posZ > 0 then faceDirection(0)
@@ -103,13 +95,6 @@ local function returnToStart()
   for _=1,math.abs(posX) do moveForwardSafe() end
   posX=0
   faceDirection(0)
-end
-
--- === Bedrock Detection ===
-local function isBedrockBelow()
-  if not turtle.detectDown() then return false end
-  if not turtle.digDown() then return true end
-  return false
 end
 
 -- === Fuel ===
@@ -150,7 +135,7 @@ local function deposit()
   turtle.select(2)
 end
 
--- === Modem ===
+-- === Modem / Telemetry ===
 local function detectModemType()
   for _,s in ipairs(peripheral.getNames()) do
     local t = peripheral.getType(s)
@@ -164,7 +149,7 @@ local function openModem()
     if not rednet.isOpen(modemSide) then rednet.open(modemSide) end
     rangeDescription = (modemType=="ender_modem" and "Unlimited (Ender)")
       or (modemType=="wired_modem" and "Unlimited (Wired)") or "64 blocks"
-    print("📡 Modem detected:",modemType,"| Range:",rangeDescription)
+    print("📡 Modem:",modemType,"| Range:",rangeDescription)
   else
     print("⚠️ No modem detected.")
   end
@@ -191,6 +176,13 @@ local function sendStatus(stage,extra,force)
   end
 end
 
+-- === Bedrock Detection ===
+local function isBedrockBelow()
+  if not turtle.detectDown() then return false end
+  if not turtle.digDown() then return true end
+  return false
+end
+
 -- === Column Mining ===
 local function mineColumn(depth)
   for d=1,depth do
@@ -213,7 +205,7 @@ end
 
 -- === Main ===
 term.clear(); term.setCursorPos(1,1)
-print("=== Smart Column Stack Miner v5.4 ===")
+print("=== Smart Column Stack Miner v5.4.1 ===")
 openModem()
 
 local prev=loadProgress()
@@ -233,20 +225,22 @@ local needed=calcFuelNeed(LENGTH,WIDTH,HEIGHT)
 checkFuel(needed)
 sendStatus("init",{range=rangeDescription},true)
 
+-- === Main Mining Loop (Perfect Grid) ===
 for z=(prev and prev.z or 1),WIDTH do
   for x=(prev and prev.x or 1),LENGTH do
     currentX, currentZ = x, z
-    print(("Column X:%d Z:%d"):format(x,z))
+    print(("Column X:%d Z:%d"):format(x, z))
+    sendStatus("column_start",{x=x,z=z},true)
     mineColumn(HEIGHT)
     saveProgress(x,z)
-    if not (x==LENGTH and z==WIDTH) then moveForwardSafe() end
+    if x < LENGTH then moveForwardSafe() end
   end
+
+  -- Move down to next row (south), then turn to start next line
   if z < WIDTH then
-    turnRight()
+    faceDirection(2) -- south
     moveForwardSafe()
-    turnRight()
-    for _=1,LENGTH-1 do moveForwardSafe() end
-    turnLeft(); turnLeft()
+    faceDirection((z % 2 == 1) and 3 or 1) -- alternate left/right
   end
 end
 
@@ -254,5 +248,5 @@ returnToStart()
 deposit()
 clearProgress()
 sendStatus("done",{blocks=blocksMined,items=depositedCount},true)
-print("✅ Finished mining and returned to chest.")
+print("✅ Finished mining. Returned to chest.")
 if speaker then pcall(function() speaker.playNote("bell",3,12) end) end
