@@ -1,64 +1,70 @@
 -- ======================================================
--- Smart Shaft Miner v5.2 (Fixed Position)
+-- Smart Column Quarry Miner v5.3
 -- FIYREX + GPT-5
 --
--- Mines a single vertical shaft (1x1) downward with all
--- Smart Quarry features: telemetry, analytics, refuel,
--- auto-return, auto-deposit, resume, and bedrock safety.
+-- Mines entire rectangular area by vertical columns.
+-- (No zig-zag movement, fixed per-column mining.)
+--
+-- Features:
+--  ✅ Length, Width, Height quarry inputs
+--  ✅ Column-by-column vertical mining
+--  ✅ Bedrock detection & safe stop
+--  ✅ Auto-return & deposit
+--  ✅ Resume from saved progress
+--  ✅ Fuel estimation & auto-refuel
+--  ✅ Fault-tolerant telemetry (v5.2)
 -- ======================================================
 
--- === Utilities ===
+-- === Utility ===
 local function prompt(msg) write(msg .. " "); return read() end
 local function promptNumber(msg)
   write(msg .. " ")
   local v = tonumber(read())
   while not v or v <= 0 do
     print("Enter a valid positive number.")
-    write(msg .. " ")
-    v = tonumber(read())
+    write(msg .. " "); v = tonumber(read())
   end
   return v
 end
-
 local function nowUtc() return os.epoch("utc") end
 local function fmt2(x) return string.format("%.2f", x) end
 
--- === Configuration ===
+-- === Config ===
 local PROGRESS_FILE = "progress.txt"
 local LOG_DIR = "logs"
 local FUEL_SLOT = 1
-local DEPTH = 0
+local LENGTH, WIDTH, HEIGHT = 0, 0, 0
 local CHEST_SIDE = "right"
 local FAST_MODE = false
-local currentDepth = 1
 local blocksMined = 0
 local depositedCount = 0
-
--- Networking
 local minerId = "Miner-1"
-local protocol = "quarry_status"
+
 local modemType, modemSide = "none", nil
 local rangeDescription, telemetryDelay = "N/A", 5
 local lastSend = 0
 local lastOnline = nowUtc()
+local lastSignalWarned = false
 
--- Analytics
 local sessionStart = nowUtc()
 local startFuel = turtle.getFuelLevel()
-local lastSignalWarned = false
 local speaker = peripheral.find("speaker")
 
+-- === Progress ===
+local currentX, currentZ = 1, 1
+local currentDepth = 0
+
 -- === File IO ===
-local function saveProgress(depth)
+local function saveProgress(x, z)
   local f = fs.open(PROGRESS_FILE, "w")
-  f.write(tostring(depth))
+  f.write(textutils.serialize({x=x, z=z}))
   f.close()
 end
 
 local function loadProgress()
   if fs.exists(PROGRESS_FILE) then
     local f = fs.open(PROGRESS_FILE, "r")
-    local data = tonumber(f.readAll())
+    local data = textutils.unserialize(f.readAll())
     f.close()
     return data
   end
@@ -69,46 +75,7 @@ local function clearProgress()
   if fs.exists(PROGRESS_FILE) then fs.delete(PROGRESS_FILE) end
 end
 
--- Offline log storage
-local sessionLogPath = nil
-local function ensureLogDir()
-  if not fs.exists(LOG_DIR) then fs.makeDir(LOG_DIR) end
-end
-
-local function startSessionLog()
-  ensureLogDir()
-  sessionLogPath = string.format("%s/session-%d.log", LOG_DIR, nowUtc())
-  local f = fs.open(sessionLogPath, "w")
-  f.write("-- telemetry backfill --\n")
-  f.close()
-end
-
-local function appendOffline(payload)
-  if not sessionLogPath then startSessionLog() end
-  local f = fs.open(sessionLogPath, "a")
-  f.write(textutils.serialize(payload) .. "\n")
-  f.close()
-end
-
-local function replayAndClearOffline()
-  if not sessionLogPath or not fs.exists(sessionLogPath) then return end
-  local f = fs.open(sessionLogPath, "r")
-  local lines = {}
-  while true do
-    local line = f.readLine()
-    if not line then break end
-    if line:sub(1,2) ~= "--" then table.insert(lines, line) end
-  end
-  f.close()
-  for _, ln in ipairs(lines) do
-    local ok, payload = pcall(textutils.unserialize, ln)
-    if ok and payload then rednet.broadcast(payload, protocol) end
-  end
-  fs.delete(sessionLogPath)
-  sessionLogPath = nil
-end
-
--- === Modem / Telemetry ===
+-- === Modem ===
 local function detectModemType()
   for _, s in ipairs(peripheral.getNames()) do
     local t = peripheral.getType(s)
@@ -134,7 +101,7 @@ local function openModem()
       :format(modemType, tostring(modemSide), rangeDescription, telemetryDelay))
     return true
   else
-    print("⚠️ No modem detected — telemetry offline. Will retry periodically.")
+    print("⚠️ No modem detected — telemetry offline.")
     return false
   end
 end
@@ -142,10 +109,10 @@ end
 local function sendStatus(stage, extra, force)
   local payload = {
     id = minerId, stage = stage,
-    depth = currentDepth, targetDepth = DEPTH,
+    x = currentX, z = currentZ, depth = currentDepth,
+    length = LENGTH, width = WIDTH, height = HEIGHT,
     fuel = turtle.getFuelLevel(),
     deposited = depositedCount,
-    fast = FAST_MODE,
     ts = nowUtc(),
     analytics = {
       items_per_min = (depositedCount / math.max(1, (nowUtc() - sessionStart)/60000)),
@@ -161,13 +128,11 @@ local function sendStatus(stage, extra, force)
   if not intervalOk then return end
 
   if modemType ~= "none" and modemSide and rednet.isOpen(modemSide) then
-    rednet.broadcast(payload, protocol)
+    rednet.broadcast(payload, "quarry_status")
     lastSend = os.clock()
     lastOnline = nowUtc()
-    replayAndClearOffline()
     lastSignalWarned = false
   else
-    appendOffline(payload)
     openModem()
   end
 
@@ -179,8 +144,8 @@ local function sendStatus(stage, extra, force)
 end
 
 -- === Fuel ===
-local function calcFuelNeed(depth)
-  return depth * 2 + 100
+local function calcFuelNeed(l, w, h)
+  return (l*w*h)*2 + 100
 end
 
 local function checkFuel(required)
@@ -198,7 +163,7 @@ local function checkFuel(required)
   end
 end
 
--- === Deposit ===
+-- === Inventory ===
 local function isFull()
   for i=2,16 do if turtle.getItemCount(i)==0 then return false end end
   return true
@@ -206,7 +171,7 @@ end
 
 local function deposit()
   sendStatus("deposit", {}, true)
-  print("Depositing items...")
+  print("Depositing...")
   if CHEST_SIDE=="right" then turtle.turnRight()
   elseif CHEST_SIDE=="left" then turtle.turnLeft()
   elseif CHEST_SIDE=="back" then turtle.turnRight(); turtle.turnRight() end
@@ -214,16 +179,14 @@ local function deposit()
     turtle.select(i)
     if turtle.getItemCount(i)>0 then
       local count=turtle.getItemCount(i)
-      if turtle.drop() then
-        depositedCount=depositedCount+count
-      end
+      if turtle.drop() then depositedCount=depositedCount+count end
     end
   end
   if CHEST_SIDE=="right" then turtle.turnLeft()
   elseif CHEST_SIDE=="left" then turtle.turnRight()
   elseif CHEST_SIDE=="back" then turtle.turnRight(); turtle.turnRight() end
   turtle.select(2)
-  sendStatus("deposit_done", {deposited=depositedCount}, true)
+  sendStatus("deposit_done",{deposited=depositedCount},true)
 end
 
 -- === Bedrock Detection ===
@@ -233,69 +196,89 @@ local function isBedrockBelow()
   return false
 end
 
--- === Mining Routine ===
-local function mineShaft(startDepth)
-  for d=startDepth, DEPTH do
-    currentDepth = d
-    sendStatus("layer_begin", {}, true)
+-- === Movement ===
+local function moveForwardSafe()
+  while not turtle.forward() do
+    turtle.dig()
+    sleep(0.1)
+  end
+end
+
+local function moveNextColumn(x, z)
+  -- Move one step in the X direction
+  if x < LENGTH then
+    moveForwardSafe()
+  else
+    -- Move to next row (Z)
+    turtle.turnRight()
+    moveForwardSafe()
+    turtle.turnRight()
+    for _=1,LENGTH-1 do moveForwardSafe() end
+    turtle.turnLeft(); turtle.turnLeft()
+  end
+end
+
+-- === Column Mining ===
+local function mineColumn(depth)
+  for d=1,depth do
+    currentDepth=d
     if isBedrockBelow() then
-      print("Bedrock reached — stopping.")
+      print("Bedrock reached.")
       sendStatus("halt_bedrock", {}, true)
+      for _=1,d-1 do turtle.up() end
       return
     end
-
     turtle.digDown()
     turtle.down()
-    blocksMined = blocksMined + 1
-
+    blocksMined=blocksMined+1
     if isFull() then
-      print("Inventory full — returning to deposit.")
+      print("Inventory full, returning to deposit.")
       for _=1,d do turtle.up() end
       deposit()
       for _=1,d do turtle.down() end
     end
-
     sendStatus("layer", {})
-    saveProgress(d)
   end
+  -- Return up
+  for _=1,depth do turtle.up() end
 end
 
 -- === Main ===
 term.clear(); term.setCursorPos(1,1)
-print("=== Smart Shaft Miner v5.2 ===")
+print("=== Smart Column Quarry Miner v5.3 ===")
 openModem()
 
 local prev = loadProgress()
 if prev then
-  print("Previous progress found (depth " .. prev .. ")")
-  local opt
-  repeat opt = prompt("Resume from last depth? (yes/no): ") until opt=="yes" or opt=="no"
+  print(("Previous progress found (X:%d Z:%d)"):format(prev.x, prev.z))
+  local opt; repeat opt=prompt("Resume from last progress? (yes/no): ") until opt=="yes" or opt=="no"
   if opt=="no" then clearProgress(); prev=nil end
 end
 
-DEPTH = promptNumber("Enter target depth:")
+LENGTH = promptNumber("Enter length:")
+WIDTH = promptNumber("Enter width:")
+HEIGHT = promptNumber("Enter depth (height):")
 CHEST_SIDE = prompt("Chest side (left/right/back):")
-FAST_MODE = (prompt("Enable fast-mode (skip air)? (yes/no):")=="yes")
-minerId = prompt("Miner ID (e.g., Shaft-1):")
+minerId = prompt("Miner ID (e.g., Miner-1):")
 
-local needed = calcFuelNeed(DEPTH)
+local needed = calcFuelNeed(LENGTH, WIDTH, HEIGHT)
 checkFuel(needed)
-sendStatus("init",{targetDepth=DEPTH,range=rangeDescription},true)
+sendStatus("init",{range=rangeDescription},true)
 
-local start = prev and (prev+1) or 1
-print("Starting mining from depth " .. start .. "...")
-mineShaft(start)
+print("Starting mining grid " .. LENGTH .. "x" .. WIDTH .. " depth " .. HEIGHT)
+for z=(prev and prev.z or 1),WIDTH do
+  for x=(prev and prev.x or 1),LENGTH do
+    currentX, currentZ = x, z
+    print(("Mining column X:%d Z:%d"):format(x,z))
+    sendStatus("column_start", {x=x, z=z}, true)
+    mineColumn(HEIGHT)
+    saveProgress(x,z)
+    if not (x==LENGTH and z==WIDTH) then moveNextColumn(x,z) end
+  end
+end
 
-print("Returning to surface...")
-for _=1,currentDepth do turtle.up() end
 deposit()
 clearProgress()
-
-sendStatus("done",{
-  depth=DEPTH,
-  blocks_mined=blocksMined,
-  items_per_min=fmt2(depositedCount / math.max(1, (nowUtc()-sessionStart)/60000))
-},true)
-
-print("✅ Shaft complete. Returned to surface.")
-if speaker then pcall(function() speaker.playNote("bell", 3, 12) end) end
+sendStatus("done",{blocks_mined=blocksMined,items=depositedCount},true)
+print("✅ Quarry complete.")
+if speaker then pcall(function() speaker.playNote("bell",3,12) end) end
